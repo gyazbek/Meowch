@@ -219,7 +219,8 @@
         };
 
         const bRest = [], bNrm = [], bCol = [], bSpec = [], bShin = [], bDbl = [], bGroup = [], bMask = [], bMask2 = [];
-        const bTri = [], bTriDbl = [];
+        const bTri = [], bTriDbl = [];   // full-detail triangles
+        const bTriC = [], bTriDblC = []; // coarser triangles over the same vertices (for small screens)
         const bEye = []; // flat: vertexIndex, eyeIndex, ux, uy, uz
         const earTwitch = []; // per ear: { verts, weights, dir }
 
@@ -237,8 +238,9 @@
             return bSpec.length - 1;
         }
 
-        // Adds a triangle, flipping winding so its normal points outward
-        function addTri(a, b, c, doubleSided = 0) {
+        // Adds a triangle, flipping winding so its normal points outward.
+        // target: 1 = full detail only, 2 = coarse only, 3 = both
+        function addTri(a, b, c, doubleSided = 0, target = 3) {
             const pa = [bRest[a * 3], bRest[a * 3 + 1], bRest[a * 3 + 2]];
             const pb = [bRest[b * 3], bRest[b * 3 + 1], bRest[b * 3 + 2]];
             const pc = [bRest[c * 3], bRest[c * 3 + 1], bRest[c * 3 + 2]];
@@ -249,8 +251,8 @@
                 bNrm[a * 3 + 2] + bNrm[b * 3 + 2] + bNrm[c * 3 + 2]
             ];
             if (dot(n, ref) < 0) { const t = b; b = c; c = t; }
-            bTri.push(a, b, c);
-            bTriDbl.push(doubleSided);
+            if (target & 1) { bTri.push(a, b, c); bTriDbl.push(doubleSided); }
+            if (target & 2) { bTriC.push(a, b, c); bTriDblC.push(doubleSided); }
         }
 
         // Ellipsoid with poles on the y axis. thetaMax < PI gives an open dome.
@@ -278,19 +280,41 @@
                 rows.push(row);
             }
 
-            for (let j = 0; j < lon; j++) addTri(top, rows[0][j], rows[0][(j + 1) % lon], doubleSided);
+            for (let j = 0; j < lon; j++) addTri(top, rows[0][j], rows[0][(j + 1) % lon], doubleSided, 1);
             for (let i = 0; i < rows.length - 1; i++) {
                 for (let j = 0; j < lon; j++) {
                     const j1 = (j + 1) % lon;
                     const a = rows[i][j], b = rows[i][j1], c = rows[i + 1][j], d = rows[i + 1][j1];
-                    addTri(a, c, b, doubleSided);
-                    addTri(b, c, d, doubleSided);
+                    addTri(a, c, b, doubleSided, 1);
+                    addTri(b, c, d, doubleSided, 1);
+                }
+            }
+            let bottom = -1;
+            if (closed) {
+                bottom = vertexAt(Math.PI, 0);
+                const last = rows[rows.length - 1];
+                for (let j = 0; j < lon; j++) addTri(bottom, last[(j + 1) % lon], last[j], doubleSided, 1);
+            }
+
+            // Coarse version: every other ring and column of the same vertices
+            const ci = [];
+            for (let i = 0; i < rows.length; i += 2) ci.push(i);
+            if (ci[ci.length - 1] !== rows.length - 1) ci.push(rows.length - 1);
+            const cols = [];
+            for (let j = 0; j < lon; j += lon % 2 === 0 ? 2 : 1) cols.push(j);
+            const nc = cols.length;
+            for (let k = 0; k < nc; k++) addTri(top, rows[0][cols[k]], rows[0][cols[(k + 1) % nc]], doubleSided, 2);
+            for (let m = 0; m < ci.length - 1; m++) {
+                const r0 = rows[ci[m]], r1 = rows[ci[m + 1]];
+                for (let k = 0; k < nc; k++) {
+                    const j = cols[k], j1 = cols[(k + 1) % nc];
+                    addTri(r0[j], r1[j], r0[j1], doubleSided, 2);
+                    addTri(r0[j1], r1[j], r1[j1], doubleSided, 2);
                 }
             }
             if (closed) {
-                const bottom = vertexAt(Math.PI, 0);
                 const last = rows[rows.length - 1];
-                for (let j = 0; j < lon; j++) addTri(bottom, last[(j + 1) % lon], last[j], doubleSided);
+                for (let k = 0; k < nc; k++) addTri(bottom, last[cols[(k + 1) % nc]], last[cols[k]], doubleSided, 2);
             }
         }
 
@@ -437,9 +461,38 @@
         const group = new Uint8Array(bGroup);
         const weight = new Float32Array(N);
         const eyeData = new Float32Array(bEye);
-        const tri = new Int32Array(bTri);
-        const triDbl = new Uint8Array(bTriDbl);
-        const TRI_COUNT = tri.length / 3;
+
+        // Triangle sets: shading mode per triangle (0 = plain, 1 = eye, 2 = cap) and a specular lookup table
+        const powTables = [];
+        const tableFor = new Map();
+        function makeTriSet(list, dblList) {
+            const t = new Int32Array(list), count = t.length / 3;
+            const mode = new Uint8Array(count), table = new Uint8Array(count);
+            for (let k = 0; k < count; k++) {
+                const a = t[k * 3];
+                mode[k] = group[a] === G.EYE ? 1 : group[a] === G.HAT ? 2 : 0;
+                const sh = shin[a];
+                if (!tableFor.has(sh)) {
+                    const tab = new Float32Array(1026);
+                    for (let i = 0; i < tab.length; i++) tab[i] = Math.pow(Math.min(1, i / 1024), sh);
+                    tableFor.set(sh, powTables.length);
+                    powTables.push(tab);
+                }
+                table[k] = tableFor.get(sh);
+            }
+            return { tri: t, dbl: new Uint8Array(dblList), mode, table, count };
+        }
+        const FINE = makeTriSet(bTri, bTriDbl);
+        const COARSE = makeTriSet(bTriC, bTriDblC);
+        let tri = FINE.tri, triDbl = FINE.dbl, triMode = FINE.mode, triTable = FINE.table, TRI_COUNT = FINE.count;
+        let lod = FINE;
+        let normalsDirty = true;
+        function useLod(set) {
+            if (set === lod) return;
+            lod = set;
+            tri = set.tri; triDbl = set.dbl; triMode = set.mode; triTable = set.table; TRI_COUNT = set.count;
+            normalsDirty = true; // recompute normals for the new triangle set
+        }
 
         const mask = new Float32Array(bMask);
         const mask2 = new Float32Array(bMask2);
@@ -480,8 +533,9 @@
         let adjList;
         {
             const nb = Array.from({ length: N }, () => new Set());
-            for (let t = 0; t < tri.length; t += 3) {
-                const a = tri[t], b = tri[t + 1], c = tri[t + 2];
+            const ft = FINE.tri;
+            for (let t = 0; t < ft.length; t += 3) {
+                const a = ft[t], b = ft[t + 1], c = ft[t + 2];
                 nb[a].add(b); nb[a].add(c);
                 nb[b].add(a); nb[b].add(c);
                 nb[c].add(a); nb[c].add(b);
@@ -499,26 +553,6 @@
 
         const scrX = new Float32Array(N), scrY = new Float32Array(N), invZ = new Float32Array(N);
         const camNX = new Float32Array(N), camNY = new Float32Array(N), camNZ = new Float32Array(N);
-
-        // Per-triangle shading mode (0 = plain, 1 = eye, 2 = cap emblem) and specular lookup table
-        const triMode = new Uint8Array(TRI_COUNT);
-        const triTable = new Uint8Array(TRI_COUNT);
-        const powTables = [];
-        {
-            const tableFor = new Map();
-            for (let t = 0; t < TRI_COUNT; t++) {
-                const a = tri[t * 3];
-                triMode[t] = group[a] === G.EYE ? 1 : group[a] === G.HAT ? 2 : 0;
-                const sh = shin[a];
-                if (!tableFor.has(sh)) {
-                    const tab = new Float32Array(1026);
-                    for (let i = 0; i < tab.length; i++) tab[i] = Math.pow(Math.min(1, i / 1024), sh);
-                    tableFor.set(sh, powTables.length);
-                    powTables.push(tab);
-                }
-                triTable[t] = tableFor.get(sh);
-            }
-        }
 
         // ------------------------------------------------------------------
         // Surface-attached line details (mouth, whiskers, cap letter)
@@ -619,6 +653,8 @@
             backBuf = new Uint8Array(W * H);
             tmpPx = new Uint32Array(W * H);
             focal = (CAM * Math.min(W, H) * 0.27) / HEAD_R;
+            // When the cat is small on screen (phones), full detail is wasted: use the coarse triangles
+            useLod(HEAD_R * focal / CAM < 230 ? COARSE : FINE);
             cX = W / 2;
             cY = H * 0.54;
         }
@@ -861,7 +897,7 @@
                 tgt[j + 2] = rest[j + 2] + held[j + 2] + w * pz0;
             }
 
-            const steps = Math.max(1, Math.ceil(dt * 240));
+            const steps = Math.max(1, Math.ceil(dt * 120));
             const h = dt / steps;
             let maxD = 0, maxV = 0;
             for (let s = 0; s < steps; s++) {
@@ -1673,8 +1709,12 @@
             updateFace(dt);
             updateEyes(dt);
             updatePull();
+            const wasAsleep = sleeping;
             stepPhysics(dt);
-            computeNormals();
+            if (!wasAsleep || normalsDirty) { // nothing moved while asleep
+                computeNormals();
+                normalsDirty = false;
+            }
             render();
 
             // Lower the render resolution if this machine can't keep up
