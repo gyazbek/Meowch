@@ -1,0 +1,1697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Meowch! A stretchy 3D cat</title>
+    <meta name="description" content="A stretchy 3D cat face you can pull, wobble and share.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cg fill='%23f59a45'%3E%3Cellipse cx='32' cy='43' rx='15' ry='13'/%3E%3Cellipse cx='12' cy='26' rx='6.5' ry='8.5'/%3E%3Cellipse cx='24' cy='14' rx='6.5' ry='8.5'/%3E%3Cellipse cx='40' cy='14' rx='6.5' ry='8.5'/%3E%3Cellipse cx='52' cy='26' rx='6.5' ry='8.5'/%3E%3C/g%3E%3C/svg%3E">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        body {
+            background: radial-gradient(ellipse at 50% 40%, #8fa0ff 0%, #6a55c9 55%, #33235f 100%);
+            font-family: Arial, sans-serif;
+        }
+
+        #stage {
+            position: fixed;
+            inset: 0;
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            touch-action: none;
+            user-select: none;
+            cursor: none;
+        }
+
+        #glove {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 72px;
+            height: 72px;
+            pointer-events: none;
+            z-index: 10;
+            display: none;
+            transform-origin: 36px 36px;
+            filter: drop-shadow(2px 4px 3px rgba(0, 0, 0, 0.3));
+        }
+
+        .ui {
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            z-index: 20;
+            font-family: Arial, sans-serif;
+            color: white;
+        }
+
+        .ui-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .ui button {
+            height: 40px;
+            min-width: 40px;
+            padding: 0 14px;
+            border: none;
+            border-radius: 20px;
+            background: rgba(0, 0, 0, 0.45);
+            backdrop-filter: blur(10px);
+            color: white;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .ui button:hover,
+        .ui button[aria-expanded="true"] {
+            background: rgba(0, 0, 0, 0.65);
+        }
+
+        #helpBtn {
+            padding: 0;
+            width: 40px;
+            font-size: 20px;
+        }
+
+        .instructions {
+            margin-top: 8px;
+            font-size: 14px;
+            background: rgba(0, 0, 0, 0.45);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            max-width: min(360px, calc(100vw - 32px));
+        }
+
+        .instructions[hidden] {
+            display: none;
+        }
+
+        .instructions h3 {
+            margin-bottom: 10px;
+            color: #ffb36b;
+        }
+
+        .instructions ul {
+            list-style-type: none;
+        }
+
+        .instructions li {
+            margin-bottom: 5px;
+            opacity: 0.9;
+        }
+
+        .instructions li::before {
+            content: "🐾 ";
+            margin-right: 5px;
+        }
+
+        #toast {
+            position: fixed;
+            left: 50%;
+            bottom: 32px;
+            transform: translateX(-50%) translateY(20px);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 18px;
+            border-radius: 20px;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s, transform 0.2s;
+            z-index: 30;
+        }
+
+        #toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="stage"></canvas>
+    <canvas id="glove"></canvas>
+
+    <div class="ui">
+        <div class="ui-buttons">
+            <button id="helpBtn" type="button" aria-expanded="false" aria-controls="helpPanel" title="How to play">?</button>
+            <button id="shareBtn" type="button" title="Copy a link to this cat">Share</button>
+            <button id="resetBtn" type="button" title="Undo all stretches">Reset</button>
+        </div>
+        <div class="instructions" id="helpPanel" hidden>
+            <h3>Meowch!</h3>
+            <ul>
+                <li>Move the cursor and the cat watches you</li>
+                <li>Click and drag any part to stretch it (nose and whiskers too)</li>
+                <li>Let go and it stays stretched (with a wobble)</li>
+                <li>Hold Shift while letting go to snap it back</li>
+                <li>Scroll to spin the head around</li>
+                <li>Double-click or press Reset to start over</li>
+                <li>Share copies a link to your stretched cat</li>
+            </ul>
+        </div>
+    </div>
+    <div id="toast" role="status" aria-live="polite"></div>
+
+    <script>
+    (() => {
+        'use strict';
+
+        // ------------------------------------------------------------------
+        // Settings
+        // ------------------------------------------------------------------
+        const CAM = 900;              // camera distance from head center
+        const HEAD_R = 150;           // head radius (world units)
+        const SIGMA = 50;             // pull falloff radius
+        const MAX_PULL = 230;         // max stretch distance
+        const K_DRAG = 700, C_DRAG = 40;        // spring while holding (tight)
+        const K_RELEASE = 220, C_RELEASE = 5;   // spring after release (wobbly)
+        const MAX_HELD = 280;         // max permanent distortion per vertex
+        const RELEASE_JIGGLE = 1.5;   // extra wobble when a stretch is kept
+        const KN = 900, CN = 8;       // neighbor coupling (rubbery surface) and its damping
+        const WHISKER_PTS = 8;        // points per whisker strand
+        const PIROUETTE_DURATION = 8; // seconds per full turn
+
+        // ------------------------------------------------------------------
+        // Small vector helpers (arrays [x, y, z])
+        // World space: x right, y down, z toward the viewer
+        // ------------------------------------------------------------------
+        const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+        const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        const scale = (a, s) => [a[0] * s, a[1] * s, a[2] * s];
+        const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+        const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+        const packColor = (h) => { const c = hex(h); return (0xff000000 | (c[2] << 16) | (c[1] << 8) | c[0]) >>> 0; };
+
+        // ------------------------------------------------------------------
+        // Mesh construction
+        // ------------------------------------------------------------------
+        const G = { HEAD: 0, EYE: 1, PUFF: 2, NOSE: 3, EAR: 4, HAT: 5, BRIM: 6 };
+        const mat = (color, spec, shin) => ({ col: hex(color), spec, shin });
+        const MAT = {
+            fur:      mat('#f59a45', 0.10, 10),
+            stripe:   mat('#cf6b1f', 0.10, 10),
+            cream:    mat('#fff1df', 0.08, 10),
+            nose:     mat('#ff6f9a', 0.55, 30),
+            eye:      mat('#ffffff', 1.00, 90),
+            innerEar: mat('#ffb0c0', 0.05, 8),
+            hat:      mat('#e0262f', 0.30, 18),
+            brim:     mat('#c41d26', 0.25, 18)
+        };
+
+        const bRest = [], bNrm = [], bCol = [], bSpec = [], bShin = [], bDbl = [], bGroup = [], bMask = [], bMask2 = [];
+        const bTri = [], bTriDbl = [];
+        const bEye = []; // flat: vertexIndex, eyeIndex, ux, uy, uz
+        const earTwitch = []; // per ear: { verts, weights, dir }
+
+        function addVertex(p, n, m, group, doubleSided = 0) {
+            const nn = norm(n);
+            bRest.push(p[0], p[1], p[2]);
+            bNrm.push(nn[0], nn[1], nn[2]);
+            bCol.push(m.col[0], m.col[1], m.col[2]);
+            bSpec.push(m.spec);
+            bShin.push(m.shin);
+            bDbl.push(doubleSided);
+            bGroup.push(group);
+            bMask.push(0);
+            bMask2.push(0);
+            return bSpec.length - 1;
+        }
+
+        // Adds a triangle, flipping winding so its normal points outward
+        function addTri(a, b, c, doubleSided = 0) {
+            const pa = [bRest[a * 3], bRest[a * 3 + 1], bRest[a * 3 + 2]];
+            const pb = [bRest[b * 3], bRest[b * 3 + 1], bRest[b * 3 + 2]];
+            const pc = [bRest[c * 3], bRest[c * 3 + 1], bRest[c * 3 + 2]];
+            const n = cross(sub(pb, pa), sub(pc, pa));
+            const ref = [
+                bNrm[a * 3] + bNrm[b * 3] + bNrm[c * 3],
+                bNrm[a * 3 + 1] + bNrm[b * 3 + 1] + bNrm[c * 3 + 1],
+                bNrm[a * 3 + 2] + bNrm[b * 3 + 2] + bNrm[c * 3 + 2]
+            ];
+            if (dot(n, ref) < 0) { const t = b; b = c; c = t; }
+            bTri.push(a, b, c);
+            bTriDbl.push(doubleSided);
+        }
+
+        // Ellipsoid with poles on the y axis. thetaMax < PI gives an open dome.
+        function addEllipsoid(center, radii, lat, lon, group, matFn, onVertex, thetaMax = Math.PI, doubleSided = 0) {
+            const closed = thetaMax >= Math.PI - 1e-6;
+
+            const vertexAt = (th, ph) => {
+                const ux = Math.sin(th) * Math.sin(ph);
+                const uy = -Math.cos(th);
+                const uz = Math.sin(th) * Math.cos(ph);
+                const p = [center[0] + radii[0] * ux, center[1] + radii[1] * uy, center[2] + radii[2] * uz];
+                const n = [ux / radii[0], uy / radii[1], uz / radii[2]];
+                const vi = addVertex(p, n, matFn(ux, uy, uz), group);
+                if (onVertex) onVertex(vi, ux, uy, uz);
+                return vi;
+            };
+
+            const top = vertexAt(0, 0);
+            const rows = [];
+            const lastRow = closed ? lat - 1 : lat;
+            for (let i = 1; i <= lastRow; i++) {
+                const th = (thetaMax * i) / lat;
+                const row = [];
+                for (let j = 0; j < lon; j++) row.push(vertexAt(th, (2 * Math.PI * j) / lon));
+                rows.push(row);
+            }
+
+            for (let j = 0; j < lon; j++) addTri(top, rows[0][j], rows[0][(j + 1) % lon], doubleSided);
+            for (let i = 0; i < rows.length - 1; i++) {
+                for (let j = 0; j < lon; j++) {
+                    const j1 = (j + 1) % lon;
+                    const a = rows[i][j], b = rows[i][j1], c = rows[i + 1][j], d = rows[i + 1][j1];
+                    addTri(a, c, b, doubleSided);
+                    addTri(b, c, d, doubleSided);
+                }
+            }
+            if (closed) {
+                const bottom = vertexAt(Math.PI, 0);
+                const last = rows[rows.length - 1];
+                for (let j = 0; j < lon; j++) addTri(bottom, last[(j + 1) % lon], last[j], doubleSided);
+            }
+        }
+
+        // Flattened cone ear with a pink inner side
+        function addEar(side) {
+            const B = [side * 88, -86, 28];
+            const T = [side * 138, -208, 18];
+            const axis = sub(T, B);
+            const len = Math.hypot(axis[0], axis[1], axis[2]);
+            const A = norm(axis);
+            const U = norm([A[1], -A[0], 0]);
+            let W = cross(U, A);
+            if (W[2] < 0) W = scale(W, -1);
+            const rings = 14, segs = 24, rx = 48, rz = 17;
+
+            const ringIdx = [];
+            for (let k = 0; k < rings; k++) {
+                const t = k / rings;
+                const f = Math.pow(1 - t, 0.85);
+                const c = add(B, scale(A, len * t));
+                const ring = [];
+                for (let s = 0; s < segs; s++) {
+                    const ang = (2 * Math.PI * s) / segs;
+                    const cu = Math.cos(ang), sv = Math.sin(ang);
+                    const p = add(c, add(scale(U, rx * f * cu), scale(W, rz * f * sv)));
+                    const n = add(norm(add(scale(U, cu / rx), scale(W, sv / rz))), scale(A, 0.3));
+                    const inner = sv > 0.45 && Math.abs(cu) < 0.8 && t > 0.12 && t < 0.8;
+                    ring.push(addVertex(p, n, inner ? MAT.innerEar : MAT.fur, G.EAR));
+                }
+                ringIdx.push(ring);
+            }
+            const tip = addVertex(T, A, MAT.fur, G.EAR);
+            const baseC = addVertex(B, scale(A, -1), MAT.fur, G.EAR);
+
+            for (let k = 0; k < rings - 1; k++) {
+                for (let s = 0; s < segs; s++) {
+                    const s1 = (s + 1) % segs;
+                    const a = ringIdx[k][s], b = ringIdx[k][s1], c = ringIdx[k + 1][s], d = ringIdx[k + 1][s1];
+                    addTri(a, c, b);
+                    addTri(b, c, d);
+                }
+            }
+            const lastRing = ringIdx[rings - 1];
+            for (let s = 0; s < segs; s++) {
+                addTri(tip, lastRing[s], lastRing[(s + 1) % segs]);
+                addTri(baseC, ringIdx[0][(s + 1) % segs], ringIdx[0][s]);
+            }
+
+            // Twitch data: ear tips move most, base stays put
+            const verts = [], weights = [];
+            ringIdx.forEach((ring, k) => ring.forEach(vi => { verts.push(vi); weights.push(Math.pow(k / rings, 1.5)); }));
+            verts.push(tip);
+            weights.push(1);
+            earTwitch.push({ verts, weights, dir: norm(add(scale(W, -1), scale(U, 0.4))) });
+        }
+
+        // Cap geometry (shared with the emblem)
+        const HAT_C = [0, -50, -6];
+        const HAT_R = [156, 102, 149];
+        const EMBLEM_DIR = norm([0, -0.5, 0.866]);   // where the paw print sits on the cap
+        const EMBLEM_U = [1, 0, 0];                    // paw "right" direction
+        const EMBLEM_V = norm(cross(EMBLEM_DIR, EMBLEM_U)); // paw "down" direction
+
+        // Cap brim: double-sided strip sticking out the front
+        function addBrim() {
+            const n = 40, rowT = [0, 0.25, 0.5, 0.75, 1];
+            const grid = [];
+            for (let i = 0; i <= n; i++) {
+                const s = -1 + (2 * i) / n;
+                const beta = s * 0.95;
+                const inner = [154 * Math.sin(beta), HAT_C[1], HAT_C[2] + 147 * Math.cos(beta)];
+                const dir = norm([Math.sin(beta) * 0.35, 0, Math.cos(beta)]);
+                const len = 78 * (1 - 0.7 * s * s);
+                grid.push(rowT.map(t => addVertex(
+                    [inner[0] + dir[0] * len * t, inner[1] + 8 * t * t, inner[2] + dir[2] * len * t],
+                    [0, -1, 0], MAT.brim, G.BRIM, 1
+                )));
+            }
+            for (let i = 0; i < n; i++) {
+                for (let r = 0; r < rowT.length - 1; r++) {
+                    const a = grid[i][r], b = grid[i + 1][r], c = grid[i][r + 1], d = grid[i + 1][r + 1];
+                    addTri(a, b, c, 1);
+                    addTri(b, d, c, 1);
+                }
+            }
+        }
+
+        // --- Head --- (stripes and the cream chin blend smoothly instead of switching per vertex)
+        const ss = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+        addEllipsoid([0, 0, 0], [HEAD_R, 135, 140], 56, 80, G.HEAD, (ux, uy, uz) => {
+            const sideStripes = ss(0.5, 0.7, Math.abs(ux)) * ss(-0.4, -0.25, uy) * (1 - ss(0.4, 0.55, uy))
+                * ss(0.2, 0.6, Math.sin(uy * 18 + 0.8));
+            const backStripes = (1 - ss(-0.45, -0.25, uz)) * ss(-0.3, -0.1, uy) * ss(0.3, 0.7, Math.sin(ux * 16));
+            const stripe = Math.max(sideStripes, backStripes);
+            const cream = ss(0.45, 0.65, uz) * ss(0.25, 0.45, uy);
+            const col = MAT.fur.col.map((f, i) => {
+                const c = f + (MAT.stripe.col[i] - f) * stripe;
+                return c + (MAT.cream.col[i] - c) * cream;
+            });
+            return { col, spec: MAT.fur.spec, shin: MAT.fur.shin };
+        });
+
+        // --- Eyes ---
+        const EYE_CENTERS = [[-52, -12, 110], [52, -12, 110]];
+        EYE_CENTERS.forEach((c, e) => {
+            addEllipsoid(c, [28, 33, 26], 30, 44, G.EYE, () => MAT.eye, (vi, ux, uy, uz) => {
+                bEye.push(vi, e, ux, uy, uz);
+            });
+        });
+
+        // --- Muzzle puffs, nose ---
+        addEllipsoid([-30, 42, 112], [40, 32, 34], 24, 36, G.PUFF, () => MAT.cream);
+        addEllipsoid([30, 42, 112], [40, 32, 34], 24, 36, G.PUFF, () => MAT.cream);
+        addEllipsoid([0, 22, 140], [16, 11, 12], 16, 24, G.NOSE, () => MAT.nose);
+
+        // --- Ears ---
+        addEar(-1);
+        addEar(1);
+
+        // --- Cap ---
+        addEllipsoid(HAT_C, HAT_R, 32, 112, G.HAT, () => MAT.hat, (vi, ux, uy, uz) => {
+            // 2D coordinates around the emblem spot; the paw print is drawn per pixel from these
+            const u = [ux, uy, uz];
+            const front = dot(u, EMBLEM_DIR) > 0;
+            bMask[vi] = front ? dot(u, EMBLEM_U) : 9;
+            bMask2[vi] = front ? dot(u, EMBLEM_V) : 9;
+        }, Math.PI / 2, 1); // open dome, double-sided so the lining shows when lifted
+        addBrim();
+
+        // ------------------------------------------------------------------
+        // Typed arrays for the simulation / renderer
+        // ------------------------------------------------------------------
+        const N = bSpec.length;
+        const rest = new Float32Array(bRest);
+        const restN = new Float32Array(bNrm);
+        const pos = new Float32Array(bRest);
+        const vel = new Float32Array(N * 3);
+        const held = new Float32Array(N * 3);
+        const nrm = new Float32Array(N * 3);
+        const baseCol = new Float32Array(bCol);
+        const specK = new Float32Array(bSpec);
+        const shin = new Float32Array(bShin);
+        const vDbl = new Uint8Array(bDbl);
+        const group = new Uint8Array(bGroup);
+        const weight = new Float32Array(N);
+        const eyeData = new Float32Array(bEye);
+        const tri = new Int32Array(bTri);
+        const triDbl = new Uint8Array(bTriDbl);
+        const TRI_COUNT = tri.length / 3;
+
+        const mask = new Float32Array(bMask);
+        const mask2 = new Float32Array(bMask2);
+
+        // Parts (the brim belongs to the cap). Grabbing a part stretches that part most,
+        // and tugs on everything else less: [sigma for same part, sigma for others, strength for others]
+        const PART_OF_GROUP = [0, 1, 2, 3, 4, 5, 5];
+        const FALLOFF = [
+            [SIGMA, SIGMA, 1.0],   // head: the whole face moves together
+            [24, 34, 0.45],  // eye
+            [34, 40, 0.6],   // cheek puff
+            [13, 26, 0.3],   // nose: stretches into a long nose
+            [60, 30, 0.35],  // ear
+            [55, 40, 0.5]    // cap
+        ];
+        const part = new Uint8Array(N);
+        for (let i = 0; i < N; i++) part[i] = PART_OF_GROUP[group[i]];
+
+        // How firmly each body-part vertex is rooted in the head: 1 = at/inside the head surface
+        // (moves exactly like the face there), 0 = sticks out freely. Keeps parts from tearing off.
+        const attach = new Float32Array(N);
+        for (let i = 0; i < N; i++) {
+            const p = part[i];
+            if (p !== 1 && p !== 2 && p !== 3 && p !== 4) continue; // eyes, puffs, nose, ears
+            const x = rest[i * 3] / HEAD_R, y = rest[i * 3 + 1] / 135, z = rest[i * 3 + 2] / 140;
+            const outside = (Math.sqrt(x * x + y * y + z * z) - 1) * 140; // ~distance above the head surface
+            const t = clamp(outside / 4, 0, 1);
+            attach[i] = 1 - t * t * (3 - 2 * t);
+        }
+        const lid = new Float32Array(N);      // eyelid coverage per eye vertex (< 0 = covered)
+        const dist2 = new Float32Array(N);    // squared rest distance to the grabbed vertex
+        const tgt = new Float32Array(N * 3);  // spring targets
+        const disp = new Float32Array(N * 3); // displacement from target
+
+        // Vertex adjacency (CSR) for neighbor coupling
+        const adjStart = new Int32Array(N + 1);
+        const adjInv = new Float32Array(N);
+        let adjList;
+        {
+            const nb = Array.from({ length: N }, () => new Set());
+            for (let t = 0; t < tri.length; t += 3) {
+                const a = tri[t], b = tri[t + 1], c = tri[t + 2];
+                nb[a].add(b); nb[a].add(c);
+                nb[b].add(a); nb[b].add(c);
+                nb[c].add(a); nb[c].add(b);
+            }
+            let total = 0;
+            for (let i = 0; i < N; i++) { adjStart[i] = total; total += nb[i].size; }
+            adjStart[N] = total;
+            adjList = new Int32Array(total);
+            for (let i = 0; i < N; i++) {
+                let q = adjStart[i];
+                for (const n of nb[i]) adjList[q++] = n;
+                adjInv[i] = nb[i].size ? 1 / nb[i].size : 0;
+            }
+        }
+
+        const scrX = new Float32Array(N), scrY = new Float32Array(N), invZ = new Float32Array(N);
+        const camNX = new Float32Array(N), camNY = new Float32Array(N), camNZ = new Float32Array(N);
+
+        // Per-triangle shading mode (0 = plain, 1 = eye, 2 = cap emblem) and specular lookup table
+        const triMode = new Uint8Array(TRI_COUNT);
+        const triTable = new Uint8Array(TRI_COUNT);
+        const powTables = [];
+        {
+            const tableFor = new Map();
+            for (let t = 0; t < TRI_COUNT; t++) {
+                const a = tri[t * 3];
+                triMode[t] = group[a] === G.EYE ? 1 : group[a] === G.HAT ? 2 : 0;
+                const sh = shin[a];
+                if (!tableFor.has(sh)) {
+                    const tab = new Float32Array(1026);
+                    for (let i = 0; i < tab.length; i++) tab[i] = Math.pow(Math.min(1, i / 1024), sh);
+                    tableFor.set(sh, powTables.length);
+                    powTables.push(tab);
+                }
+                triTable[t] = tableFor.get(sh);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Surface-attached line details (mouth, whiskers, cap letter)
+        // Each point is bound to a vertex + offset so it follows deformation.
+        // ------------------------------------------------------------------
+        // Attaches a detail to the face surface (head or muzzle, never the nose,
+        // so stretching the nose doesn't drag the mouth along)
+        function anchorOnFace(x, y, push = 1.5) {
+            let best = -1, bestZ = -Infinity, near = -1, nearD = Infinity;
+            for (let i = 0; i < N; i++) {
+                const g = group[i];
+                if (g !== G.HEAD && g !== G.PUFF) continue;
+                if (restN[i * 3 + 2] < 0.25) continue;
+                const dx = rest[i * 3] - x, dy = rest[i * 3 + 1] - y;
+                const d2 = dx * dx + dy * dy;
+                if (d2 < nearD) { nearD = d2; near = i; }
+                if (d2 < 196 && rest[i * 3 + 2] > bestZ) { bestZ = rest[i * 3 + 2]; best = i; }
+            }
+            const vi = best >= 0 ? best : near;
+            const vx = rest[vi * 3], vy = rest[vi * 3 + 1], vz = rest[vi * 3 + 2];
+            const nx = restN[vi * 3], ny = restN[vi * 3 + 1], nz = restN[vi * 3 + 2];
+            const z = vz - (nx * (x - vx) + ny * (y - vy)) / Math.max(nz, 0.25);
+            return { vi, o: [x - vx + nx * push, y - vy + ny * push, z - vz + nz * push] };
+        }
+
+        const lines = [];
+
+        // Mouth
+        const mouthColor = packColor('#4a2a1a');
+        lines.push({ color: mouthColor, width: 3.2, pts: [[0, 32], [0, 43]].map(([x, y]) => anchorOnFace(x, y)) });
+        lines.push({
+            color: mouthColor, width: 3.2,
+            pts: [[-24, 45], [-17, 51], [-9, 51], [-2, 46], [0, 43], [2, 46], [9, 51], [17, 51], [24, 45]]
+                .map(([x, y]) => anchorOnFace(x, y))
+        });
+
+        // Whiskers: simulated strands anchored to the muzzle, so they can be pulled too
+        const whiskerColor = packColor('#3b2a22');
+        const whiskers = [];
+        for (const side of [-1, 1]) {
+            for (const [y, dy] of [[38, -14], [46, 0], [54, 14]]) {
+                const a = anchorOnFace(side * 40, y);
+                const tip = [side * 105, dy, 4];
+                const offs = [];
+                for (let k = 0; k < WHISKER_PTS; k++) {
+                    const t = k / (WHISKER_PTS - 1);
+                    offs.push(add(add(a.o, scale(tip, t)), [0, -12 * t * (1 - t), 8 * t * (1 - t)]));
+                }
+                const wk = {
+                    vi: a.vi, offs,
+                    pos: new Float32Array(WHISKER_PTS * 3),
+                    vel: new Float32Array(WHISKER_PTS * 3),
+                    held: new Float32Array(WHISKER_PTS * 3),
+                    w: new Float32Array(WHISKER_PTS)
+                };
+                for (let k = 0; k < WHISKER_PTS; k++) {
+                    for (let c = 0; c < 3; c++) wk.pos[k * 3 + c] = rest[a.vi * 3 + c] + offs[k][c];
+                }
+                whiskers.push(wk);
+                lines.push({ color: whiskerColor, width: 1.6, wk });
+            }
+        }
+
+        // Open-mouth position (drawn when the cat is pulled or surprised)
+        const mouthAnchor = anchorOnFace(0, 50);
+        const MOUTH_DARK = packColor('#3a1418');
+        const TONGUE = packColor('#ff7a8a');
+        const [LID_R, LID_G, LID_B] = MAT.fur.col;
+
+        // ------------------------------------------------------------------
+        // Canvas / buffers
+        // ------------------------------------------------------------------
+        const canvas = document.getElementById('stage');
+        const ctx = canvas.getContext('2d');
+        let W = 0, H = 0, img, px, zb, idb, bary1, bary2, backBuf, pbuf, tmpPx, focal = 1, cX = 0, cY = 0;
+        let pxScale = 1, quality = 1, prevBox = null;
+
+        function resize() {
+            const cssW = window.innerWidth, cssH = window.innerHeight;
+            const dpr = window.devicePixelRatio || 1;
+            // Native resolution on 1x screens (edges are anti-aliased), up to 1.5x on HiDPI
+            let s = Math.min(1.5, Math.max(1, dpr)) * quality;
+            const budget = 3500000;
+            if (cssW * cssH * s * s > budget) s = Math.sqrt(budget / (cssW * cssH));
+            pxScale = s;
+            prevBox = null;
+            W = Math.max(1, Math.round(cssW * s));
+            H = Math.max(1, Math.round(cssH * s));
+            canvas.width = W;
+            canvas.height = H;
+            img = ctx.createImageData(W, H);
+            px = new Uint32Array(img.data.buffer);
+            zb = new Float32Array(W * H);
+            idb = new Int32Array(W * H).fill(-1);
+            bary1 = new Float32Array(W * H);
+            bary2 = new Float32Array(W * H);
+            pbuf = new Uint8Array(W * H).fill(255);
+            backBuf = new Uint8Array(W * H);
+            tmpPx = new Uint32Array(W * H);
+            focal = (CAM * Math.min(W, H) * 0.27) / HEAD_R;
+            cX = W / 2;
+            cY = H * 0.54;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ------------------------------------------------------------------
+        // Head state
+        // ------------------------------------------------------------------
+        let lookYaw = 0, lookPitch = 0;
+        let spin = 0, spinTarget = 0;
+        let pirouetteP = -1, untilPirouette = 6 + Math.random() * 6, pirouetteAngle = 0;
+        let bob = 0, time = 0;
+        let m00 = 1, m01 = 0, m02 = 0, m10 = 0, m11 = 1, m12 = 0, m20 = 0, m21 = 0, m22 = 1;
+        const eyeLook = [[0, 0, 1], [0, 0, 1]];
+
+        const mouse = { x: 0, y: 0 };
+        let hovering = false;
+        let dragging = false;
+        const grab = { sx: 0, sy: 0, d: CAM, part: 0, wk: null };
+        const pull = [0, 0, 0]; // current pull vector (object space)
+
+        // Expressions
+        let blinkT = -1, nextBlink = 1.5 + Math.random() * 3;
+        let squint = 0, surprise = 0, mouthOpen = 0, pullFrac = 0;
+        let pupilLo = 0.91, lidTop = -1.2, lidBottom = 1.2;
+        let nextTwitch = 3 + Math.random() * 5;
+        let sleeping = false;
+        const wake = () => { sleeping = false; };
+
+        function updateFace(dt) {
+            // Random blinks (sometimes a double blink)
+            if (blinkT >= 0) {
+                blinkT += dt / 0.18;
+                if (blinkT >= 1) {
+                    blinkT = -1;
+                    nextBlink = Math.random() < 0.2 ? 0.1 : 2 + Math.random() * 4;
+                }
+            } else {
+                nextBlink -= dt;
+                if (nextBlink <= 0) blinkT = 0;
+            }
+            const blink = blinkT >= 0 ? Math.sin(Math.PI * blinkT) : 0;
+
+            // Surprised when grabbed, squints and opens mouth the harder you pull
+            const k = 1 - Math.exp(-dt * 10);
+            surprise *= Math.exp(-dt * 2.5);
+            squint += ((dragging ? 0.6 * pullFrac : 0) - squint) * k;
+            const mouthTarget = Math.min(1, (dragging ? 0.15 + 0.85 * pullFrac : 0) + 0.6 * surprise);
+            mouthOpen += (mouthTarget - mouthOpen) * k;
+            pupilLo = 0.91 + 0.045 * surprise;
+
+            const close = Math.max(blink, squint * (1 - surprise));
+            lidTop = -1.2 + 1.45 * close;
+            lidBottom = 1.2 - close;
+
+            // Occasional ear twitch
+            nextTwitch -= dt;
+            if (nextTwitch <= 0) {
+                nextTwitch = 3 + Math.random() * 6;
+                if (!dragging) {
+                    const ear = earTwitch[Math.random() < 0.5 ? 0 : 1];
+                    const amp = 300;
+                    for (let i = 0; i < ear.verts.length; i++) {
+                        const j = ear.verts[i] * 3, w = ear.weights[i] * amp;
+                        vel[j] += ear.dir[0] * w;
+                        vel[j + 1] += ear.dir[1] * w;
+                        vel[j + 2] += ear.dir[2] * w;
+                    }
+                    wake();
+                }
+            }
+        }
+
+        function updateHead(dt) {
+            if (dragging) return; // freeze orientation while pulling
+
+            const tYaw = hovering ? clamp(((mouse.x - cX) / W) * 1.3, -0.7, 0.7) : 0;
+            const tPitch = hovering ? clamp((-(mouse.y - cY) / H) * 1.0, -0.45, 0.45) : 0;
+            const k = 1 - Math.exp(-dt * 5);
+            lookYaw += (tYaw - lookYaw) * k;
+            lookPitch += (tPitch - lookPitch) * k;
+            spin += (spinTarget - spin) * (1 - Math.exp(-dt * 6));
+
+            if (pirouetteP >= 0) {
+                pirouetteP += dt / PIROUETTE_DURATION;
+                if (pirouetteP >= 1) {
+                    pirouetteP = -1;
+                    untilPirouette = 12 + Math.random() * 13;
+                }
+            } else {
+                untilPirouette -= dt;
+                if (untilPirouette <= 0) pirouetteP = 0;
+            }
+            const p = Math.max(0, pirouetteP);
+            const eased = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+            pirouetteAngle = pirouetteP >= 0 ? eased * Math.PI * 2 : 0;
+
+            bob = Math.sin(time * 1.6) * 3.5;
+
+            const yaw = lookYaw + spin + pirouetteAngle;
+            const pitch = lookPitch;
+            const cyw = Math.cos(yaw), syw = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+            // R = Rx(pitch) * Ry(yaw)
+            m00 = cyw;       m01 = 0;  m02 = syw;
+            m10 = sp * syw;  m11 = cp; m12 = -sp * cyw;
+            m20 = -cp * syw; m21 = sp; m22 = cp * cyw;
+        }
+
+        function updateEyes(dt) {
+            // Point in front of the face under the cursor, converted to object space
+            const dq = CAM - 400;
+            const mx = hovering || dragging ? mouse.x : cX;
+            const my = hovering || dragging ? mouse.y : cY;
+            const qx = ((mx - cX) * dq) / focal;
+            const qy = ((my - cY) * dq) / focal - bob;
+            const qz = CAM - dq;
+            const ox = m00 * qx + m10 * qy + m20 * qz;
+            const oy = m01 * qx + m11 * qy + m21 * qz;
+            const oz = m02 * qx + m12 * qy + m22 * qz;
+
+            const maxA = 0.55, k = 1 - Math.exp(-dt * 12);
+            for (let e = 0; e < 2; e++) {
+                const c = EYE_CENTERS[e];
+                let t = norm([ox - c[0], oy - c[1], oz - c[2]]);
+                if (t[2] < Math.cos(maxA)) {
+                    const h = Math.hypot(t[0], t[1]) || 1;
+                    t = [(t[0] / h) * Math.sin(maxA), (t[1] / h) * Math.sin(maxA), Math.cos(maxA)];
+                }
+                const l = eyeLook[e];
+                eyeLook[e] = norm([l[0] + (t[0] - l[0]) * k, l[1] + (t[1] - l[1]) * k, l[2] + (t[2] - l[2]) * k]);
+            }
+
+            // Store how directly each eye vertex faces the look direction; iris/pupil are drawn per pixel
+            for (let i = 0; i < eyeData.length; i += 5) {
+                const vi = eyeData[i], l = eyeLook[eyeData[i + 1]], uy = eyeData[i + 3];
+                mask[vi] = eyeData[i + 2] * l[0] + uy * l[1] + eyeData[i + 4] * l[2];
+                lid[vi] = Math.min(uy - lidTop, lidBottom - uy);
+            }
+        }
+
+        function updatePull() {
+            if (!dragging) return;
+            let x = ((mouse.x - grab.sx) * grab.d) / focal;
+            let y = ((mouse.y - grab.sy) * grab.d) / focal;
+            let len = Math.hypot(x, y);
+            if (len > 0) {
+                const s = (MAX_PULL * Math.tanh(len / MAX_PULL)) / len;
+                x *= s; y *= s; len *= s;
+            }
+            const z = len * 0.25; // bulge slightly toward the viewer
+            // camera -> object space (transpose of R)
+            pull[0] = m00 * x + m10 * y + m20 * z;
+            pull[1] = m01 * x + m11 * y + m21 * z;
+            pull[2] = m02 * x + m12 * y + m22 * z;
+
+            // Bigger pulls drag a wider area along, so long stretches look rounder
+            pullFrac = len / MAX_PULL;
+            if (grab.wk) return; // whisker pull: the face itself doesn't move
+            computeWeights(pullFrac);
+        }
+
+        // Prepares falloff distances for a grab at mesh vertex vi
+        function setGrabVertex(vi) {
+            grab.vi = vi;
+            grab.part = part[vi];
+            const gx = rest[vi * 3], gy = rest[vi * 3 + 1], gz = rest[vi * 3 + 2];
+            for (let i = 0; i < N; i++) {
+                const dx = rest[i * 3] - gx, dy = rest[i * 3 + 1] - gy, dz = rest[i * 3 + 2] - gz;
+                dist2[i] = dx * dx + dy * dy + dz * dz;
+            }
+        }
+
+        // How strongly each vertex follows the current pull
+        function computeWeights(frac) {
+            const f = FALLOFF[grab.part], grow = 1 + 0.6 * frac;
+            const invSame = 1 / (2 * (f[0] * grow) ** 2);
+            const invOther = 1 / (2 * (f[1] * grow) ** 2);
+            const otherScale = f[2];
+            for (let i = 0; i < N; i++) {
+                // What the face at this spot does
+                const wFace = otherScale * Math.exp(-dist2[i] * invOther);
+                let w = wFace;
+                if (part[i] === grab.part) {
+                    // The grabbed part stretches, but where it meets the head it follows the face
+                    const wSame = Math.exp(-dist2[i] * invSame);
+                    w = wSame + (wFace - wSame) * attach[i];
+                }
+                weight[i] = w < 0.003 ? 0 : w;
+            }
+        }
+
+        // Base stays attached; points past the grab point follow fully
+        function setWhiskerWeights(wk, gf) {
+            for (let k = 0; k < WHISKER_PTS; k++) wk.w[k] = k >= gf ? 1 : Math.pow(k / gf, 1.5);
+        }
+
+        // Pull length as a fraction of the max (object-space pull includes the 0.25 bulge)
+        const fracFromPull = (p) => Math.hypot(p[0], p[1], p[2]) / Math.sqrt(1.0625) / MAX_PULL;
+
+        // Makes a pull permanent (limited), optionally adding a release jiggle
+        function bakeMesh(p, jiggle) {
+            for (let i = 0; i < N; i++) {
+                const w = weight[i];
+                if (!w) continue;
+                const j = i * 3;
+                let hx = held[j] + w * p[0], hy = held[j + 1] + w * p[1], hz = held[j + 2] + w * p[2];
+                const len = Math.hypot(hx, hy, hz);
+                if (len > MAX_HELD) { const s = MAX_HELD / len; hx *= s; hy *= s; hz *= s; }
+                held[j] = hx; held[j + 1] = hy; held[j + 2] = hz;
+                vel[j] += w * p[0] * jiggle;
+                vel[j + 1] += w * p[1] * jiggle;
+                vel[j + 2] += w * p[2] * jiggle;
+            }
+        }
+
+        function bakeWhisker(wk, p, jiggle) {
+            for (let q = 0; q < WHISKER_PTS; q++) {
+                const j = q * 3, w = wk.w[q];
+                let hx = wk.held[j] + w * p[0], hy = wk.held[j + 1] + w * p[1], hz = wk.held[j + 2] + w * p[2];
+                const len = Math.hypot(hx, hy, hz);
+                if (len > MAX_HELD) { const s = MAX_HELD / len; hx *= s; hy *= s; hz *= s; }
+                wk.held[j] = hx; wk.held[j + 1] = hy; wk.held[j + 2] = hz;
+                wk.vel[j] += w * p[0] * jiggle;
+                wk.vel[j + 1] += w * p[1] * jiggle;
+                wk.vel[j + 2] += w * p[2] * jiggle;
+            }
+        }
+
+        function stepPhysics(dt) {
+            if (sleeping) return;
+            const k = dragging ? K_DRAG : K_RELEASE;
+            const c = dragging ? C_DRAG : C_RELEASE;
+            const px0 = dragging ? pull[0] : 0, py0 = dragging ? pull[1] : 0, pz0 = dragging ? pull[2] : 0;
+            for (let i = 0; i < N; i++) {
+                const w = dragging ? weight[i] : 0;
+                const j = i * 3;
+                tgt[j] = rest[j] + held[j] + w * px0;
+                tgt[j + 1] = rest[j + 1] + held[j + 1] + w * py0;
+                tgt[j + 2] = rest[j + 2] + held[j + 2] + w * pz0;
+            }
+
+            const steps = Math.max(1, Math.ceil(dt * 240));
+            const h = dt / steps;
+            let maxD = 0, maxV = 0;
+            for (let s = 0; s < steps; s++) {
+                for (let j = 0; j < N * 3; j++) disp[j] = pos[j] - tgt[j];
+                const lastStep = s === steps - 1;
+                for (let i = 0; i < N; i++) {
+                    const j = i * 3, inv = adjInv[i];
+                    // Neighbor averages of displacement and velocity (surface tension + internal damping)
+                    let lx = 0, ly = 0, lz = 0, vx = 0, vy = 0, vz = 0;
+                    for (let q = adjStart[i], qe = adjStart[i + 1]; q < qe; q++) {
+                        const n = adjList[q] * 3;
+                        lx += disp[n]; ly += disp[n + 1]; lz += disp[n + 2];
+                        vx += vel[n]; vy += vel[n + 1]; vz += vel[n + 2];
+                    }
+                    const dx = disp[j], dy = disp[j + 1], dz = disp[j + 2];
+                    let ux = vel[j], uy = vel[j + 1], uz = vel[j + 2];
+                    ux += (-k * dx + KN * (lx * inv - dx) - c * ux + CN * (vx * inv - ux)) * h;
+                    uy += (-k * dy + KN * (ly * inv - dy) - c * uy + CN * (vy * inv - uy)) * h;
+                    uz += (-k * dz + KN * (lz * inv - dz) - c * uz + CN * (vz * inv - uz)) * h;
+                    vel[j] = ux; vel[j + 1] = uy; vel[j + 2] = uz;
+                    pos[j] += ux * h; pos[j + 1] += uy * h; pos[j + 2] += uz * h;
+                    if (lastStep) {
+                        const ad = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+                        const av = Math.abs(ux) + Math.abs(uy) + Math.abs(uz);
+                        if (ad > maxD) maxD = ad;
+                        if (av > maxV) maxV = av;
+                    }
+                }
+
+                // Whisker strands follow their anchor on the muzzle
+                for (const wk of whiskers) {
+                    const vj = wk.vi * 3, active = dragging && grab.wk === wk;
+                    for (let q = 0; q < WHISKER_PTS; q++) {
+                        const j = q * 3, o = wk.offs[q], w = active ? wk.w[q] : 0;
+                        for (let a = 0; a < 3; a++) {
+                            const tv = pos[vj + a] + o[a] + wk.held[j + a] + w * pull[a];
+                            const dd = wk.pos[j + a] - tv;
+                            const v = wk.vel[j + a] + (-k * dd - c * wk.vel[j + a]) * h;
+                            wk.vel[j + a] = v;
+                            wk.pos[j + a] += v * h;
+                            if (lastStep) {
+                                if (Math.abs(dd) > maxD) maxD = Math.abs(dd);
+                                if (Math.abs(v) > maxV) maxV = Math.abs(v);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Settle completely and stop simulating once everything is still
+            if (!dragging && maxD < 0.03 && maxV < 0.3) {
+                pos.set(tgt);
+                vel.fill(0);
+                for (const wk of whiskers) {
+                    wk.vel.fill(0);
+                    for (let q = 0; q < WHISKER_PTS; q++) {
+                        for (let a = 0; a < 3; a++) wk.pos[q * 3 + a] = pos[wk.vi * 3 + a] + wk.offs[q][a] + wk.held[q * 3 + a];
+                    }
+                }
+                sleeping = true;
+            }
+        }
+
+        function computeNormals() {
+            nrm.fill(0);
+            for (let t = 0; t < TRI_COUNT; t++) {
+                const a = tri[t * 3] * 3, b = tri[t * 3 + 1] * 3, c = tri[t * 3 + 2] * 3;
+                const e1x = pos[b] - pos[a], e1y = pos[b + 1] - pos[a + 1], e1z = pos[b + 2] - pos[a + 2];
+                const e2x = pos[c] - pos[a], e2y = pos[c + 1] - pos[a + 1], e2z = pos[c + 2] - pos[a + 2];
+                const nx = e1y * e2z - e1z * e2y, ny = e1z * e2x - e1x * e2z, nz = e1x * e2y - e1y * e2x;
+                nrm[a] += nx; nrm[a + 1] += ny; nrm[a + 2] += nz;
+                nrm[b] += nx; nrm[b + 1] += ny; nrm[b + 2] += nz;
+                nrm[c] += nx; nrm[c + 1] += ny; nrm[c + 2] += nz;
+            }
+            for (let i = 0; i < N * 3; i += 3) {
+                const l = Math.hypot(nrm[i], nrm[i + 1], nrm[i + 2]);
+                if (l > 1e-9) { nrm[i] /= l; nrm[i + 1] /= l; nrm[i + 2] /= l; }
+                else { nrm[i] = restN[i]; nrm[i + 1] = restN[i + 1]; nrm[i + 2] = restN[i + 2]; }
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // Rendering: software rasterizer with z-buffer + per-pixel lighting
+        // ------------------------------------------------------------------
+        const [LX, LY, LZ] = norm([-0.45, -0.6, 0.66]);
+        const [HX, HY, HZ] = norm([LX, LY, LZ + 1]);
+        const [FX, FY, FZ] = norm([0.7, 0.35, 0.45]);
+
+        // Projects vertices to the screen and returns their bounding box
+        function transformVertices() {
+            let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+            for (let i = 0; i < N; i++) {
+                const j = i * 3;
+                const x = pos[j], y = pos[j + 1], z = pos[j + 2];
+                const cx = m00 * x + m01 * y + m02 * z;
+                const cy = m10 * x + m11 * y + m12 * z + bob;
+                const cz = m20 * x + m21 * y + m22 * z;
+                const d = CAM - cz;
+                const s = focal / d;
+                const sxv = cX + cx * s, syv = cY + cy * s;
+                scrX[i] = sxv;
+                scrY[i] = syv;
+                invZ[i] = 1 / d;
+                if (sxv < x0) x0 = sxv;
+                if (sxv > x1) x1 = sxv;
+                if (syv < y0) y0 = syv;
+                if (syv > y1) y1 = syv;
+
+                let nx = m00 * nrm[j] + m01 * nrm[j + 1] + m02 * nrm[j + 2];
+                let ny = m10 * nrm[j] + m11 * nrm[j + 1] + m12 * nrm[j + 2];
+                let nz = m20 * nrm[j] + m21 * nrm[j + 1] + m22 * nrm[j + 2];
+                camNX[i] = nx; camNY[i] = ny; camNZ[i] = nz;
+            }
+            return [x0, y0, x1, y1];
+        }
+
+        const sstep = (x, e0, e1) => {
+            const t = x <= e0 ? 0 : x >= e1 ? 1 : (x - e0) / (e1 - e0);
+            return t * t * (3 - 2 * t);
+        };
+
+        // Paw print on the cap: soft-edged ellipses in the emblem's 2D coordinates
+        const PAW_SCALE = 1.25;
+        const PAW = [
+            // [center u, center v, radius u, radius v]  (v points down)
+            [0, 0.075, 0.12, 0.115],       // main pad (taller to offset the cap's curve)
+            [-0.06, 0.125, 0.075, 0.08],   // lower lobes give the pad its rounded-triangle shape
+            [0.06, 0.125, 0.075, 0.08],
+            [-0.155, -0.085, 0.052, 0.08], // toe beans
+            [-0.057, -0.185, 0.052, 0.08],
+            [0.057, -0.185, 0.052, 0.08],
+            [0.155, -0.085, 0.052, 0.08]
+        ];
+        function pawCoverage(u, v) {
+            u /= PAW_SCALE; v /= PAW_SCALE;
+            if (u * u + v * v > 0.1) return 0;
+            let c = 0;
+            for (let i = 0; i < PAW.length; i++) {
+                const p = PAW[i];
+                const dx = (u - p[0]) / p[2], dy = (v - p[1]) / p[3];
+                const e = 1 - sstep(dx * dx + dy * dy, 0.82, 1);
+                if (e > c) c = e;
+            }
+            return c;
+        }
+
+        // Pass 1: visibility only (depth, triangle id, barycentrics). Cheap, so overdraw is fine.
+        function rasterTriangles() {
+            for (let t = 0; t < TRI_COUNT; t++) {
+                const a = tri[t * 3];
+                let b = tri[t * 3 + 1], c = tri[t * 3 + 2];
+                const x0 = scrX[a], y0 = scrY[a];
+                let x1 = scrX[b], y1 = scrY[b], x2 = scrX[c], y2 = scrY[c];
+                let area = (x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0);
+                let swapped = false;
+                if (area <= 0) {
+                    if (!triDbl[t] || area === 0) continue; // back-face cull
+                    const tmp = b; b = c; c = tmp;
+                    x1 = scrX[b]; y1 = scrY[b]; x2 = scrX[c]; y2 = scrY[c];
+                    area = -area;
+                    swapped = true;
+                }
+
+                const minX = Math.max(0, Math.floor(Math.min(x0, x1, x2)));
+                const maxX = Math.min(W - 1, Math.ceil(Math.max(x0, x1, x2)));
+                const minY = Math.max(0, Math.floor(Math.min(y0, y1, y2)));
+                const maxY = Math.min(H - 1, Math.ceil(Math.max(y0, y1, y2)));
+                if (minX > maxX || minY > maxY) continue;
+
+                const inv = 1 / area;
+                const z0 = invZ[a], dz1 = invZ[b] - z0, dz2 = invZ[c] - z0;
+                const A0 = -(y2 - y1), B0 = x2 - x1;
+                const A1 = -(y0 - y2), B1 = x0 - x2;
+                const A2 = -(y1 - y0), B2 = x1 - x0;
+                const sx0 = minX + 0.5;
+
+                for (let y = minY; y <= maxY; y++) {
+                    const py = y + 0.5;
+                    let w0 = A0 * (sx0 - x1) + B0 * (py - y1);
+                    let w1 = A1 * (sx0 - x2) + B1 * (py - y2);
+                    let w2 = A2 * (sx0 - x0) + B2 * (py - y0);
+                    let idx = y * W + minX;
+                    for (let x = minX; x <= maxX; x++, idx++, w0 += A0, w1 += A1, w2 += A2) {
+                        if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+                        const l1 = w1 * inv, l2 = w2 * inv;
+                        const z = z0 + l1 * dz1 + l2 * dz2;
+                        if (z <= zb[idx]) continue;
+                        zb[idx] = z;
+                        idb[idx] = t;
+                        // Store weights for the triangle's original vertex order
+                        if (swapped) { bary1[idx] = l2; bary2[idx] = l1; backBuf[idx] = 1; }
+                        else { bary1[idx] = l1; bary2[idx] = l2; backBuf[idx] = 0; }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: shade each visible pixel exactly once
+        function shadePixels(box) {
+            let lastT = -1, mode = 0, tab = powTables[0], sk = 0, pt = 0;
+            let nx0 = 0, nx1 = 0, nx2 = 0, ny0 = 0, ny1 = 0, ny2 = 0, nz0 = 0, nz1 = 0, nz2 = 0;
+            let r0 = 0, r1 = 0, r2 = 0, g0 = 0, g1 = 0, g2 = 0, b0 = 0, b1 = 0, b2 = 0;
+            let k0 = 0, k1 = 0, k2 = 0, q0 = 0, q1 = 0, q2 = 0, s0 = 0, s1 = 0, s2 = 0;
+
+            for (let y = box[1]; y < box[3]; y++) {
+                let idx = y * W + box[0];
+                for (let x = box[0]; x < box[2]; x++, idx++) {
+                    const t = idb[idx];
+                    if (t < 0) continue;
+                    if (t !== lastT) {
+                        lastT = t;
+                        const a = tri[t * 3], b = tri[t * 3 + 1], c = tri[t * 3 + 2];
+                        mode = triMode[t]; tab = powTables[triTable[t]]; sk = specK[a]; pt = part[a];
+                        nx0 = camNX[a]; nx1 = camNX[b]; nx2 = camNX[c];
+                        ny0 = camNY[a]; ny1 = camNY[b]; ny2 = camNY[c];
+                        nz0 = camNZ[a]; nz1 = camNZ[b]; nz2 = camNZ[c];
+                        r0 = baseCol[a * 3]; r1 = baseCol[b * 3]; r2 = baseCol[c * 3];
+                        g0 = baseCol[a * 3 + 1]; g1 = baseCol[b * 3 + 1]; g2 = baseCol[c * 3 + 1];
+                        b0 = baseCol[a * 3 + 2]; b1 = baseCol[b * 3 + 2]; b2 = baseCol[c * 3 + 2];
+                        k0 = mask[a]; k1 = mask[b]; k2 = mask[c];
+                        s0 = mask2[a]; s1 = mask2[b]; s2 = mask2[c];
+                        q0 = lid[a]; q1 = lid[b]; q2 = lid[c];
+                    }
+                    const l1 = bary1[idx], l2 = bary2[idx], l0 = 1 - l1 - l2;
+
+                    // Interpolated, renormalized normal
+                    let nx = l0 * nx0 + l1 * nx1 + l2 * nx2;
+                    let ny = l0 * ny0 + l1 * ny1 + l2 * ny2;
+                    let nz = l0 * nz0 + l1 * nz1 + l2 * nz2;
+                    const il = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz + 1e-12);
+                    nx *= il; ny *= il; nz *= il;
+                    const back = backBuf[idx] === 1; // seeing the inside / underside
+                    if (back) { nx = -nx; ny = -ny; nz = -nz; }
+
+                    // Surface color
+                    let br, bg, bb, sm = 1;
+                    if (back && mode === 2) {
+                        // Inside of the cap: darker lining, no emblem
+                        br = r0 * 0.5; bg = g0 * 0.5; bb = b0 * 0.5; sm = 0.25;
+                    } else if (mode === 0) {
+                        br = l0 * r0 + l1 * r1 + l2 * r2;
+                        bg = l0 * g0 + l1 * g1 + l2 * g2;
+                        bb = l0 * b0 + l1 * b1 + l2 * b2;
+                    } else {
+                        const m = l0 * k0 + l1 * k1 + l2 * k2;
+                        if (mode === 1) {
+                            const lidV = l0 * q0 + l1 * q1 + l2 * q2;
+                            if (lidV < 0) {
+                                // Eyelid (fur colored, not glossy)
+                                br = LID_R; bg = LID_G; bb = LID_B; sm = 0.12;
+                            } else {
+                                const iris = sstep(m, 0.79, 0.825);
+                                const pupil = sstep(m, pupilLo, pupilLo + 0.025);
+                                br = 255 - 185 * iris; bg = 255 - 65 * iris; bb = 255 - 150 * iris;
+                                br += (22 - br) * pupil; bg += (20 - bg) * pupil; bb += (36 - bb) * pupil;
+                                // Dark lash line along the lid edge
+                                const lash = 1 - sstep(lidV, 0.015, 0.06);
+                                if (lash > 0) {
+                                    br += (55 - br) * lash; bg += (32 - bg) * lash; bb += (22 - bb) * lash;
+                                    sm = 1 - 0.8 * lash;
+                                }
+                            }
+                        } else {
+                            // Cap with a white paw print
+                            const e = pawCoverage(m, l0 * s0 + l1 * s1 + l2 * s2);
+                            br = r0 + (255 - r0) * e; bg = g0 + (255 - g0) * e; bb = b0 + (255 - b0) * e;
+                        }
+                    }
+
+                    // Lighting
+                    const diff = nx * LX + ny * LY + nz * LZ;
+                    const fill = nx * FX + ny * FY + nz * FZ;
+                    const ndh = nx * HX + ny * HY + nz * HZ;
+                    const spec = ndh > 0 ? sk * sm * tab[(ndh * 1024) | 0] : 0;
+                    const rz = nz > 0 ? 1 - nz : 1;
+                    const rim = rz * rz * rz * 0.3;
+                    const light = 0.36 + (diff > 0 ? 0.7 * diff : 0) + (fill > 0 ? 0.18 * fill : 0);
+                    let r = br * light + 255 * spec + 180 * rim;
+                    let g = bg * light + 255 * spec + 160 * rim;
+                    let bl = bb * light + 255 * spec + 255 * rim;
+                    if (r > 255) r = 255;
+                    if (g > 255) g = 255;
+                    if (bl > 255) bl = 255;
+                    px[idx] = 0xff000000 | ((bl | 0) << 16) | ((g | 0) << 8) | (r | 0);
+                    pbuf[idx] = pt;
+                }
+            }
+        }
+
+        // Smooths jagged edges: feathers the silhouette into the background and
+        // softens boundaries between parts (eye/head, ear/cap, whiskers, ...)
+        const LINE_PART = 250, BG_PART = 255;
+        function antialias(box) {
+            const x0 = Math.max(1, box[0]), x1 = Math.min(W - 1, box[2]);
+            const y0 = Math.max(1, box[1]), y1 = Math.min(H - 1, box[3]);
+            for (let y = y0 - 1; y <= y1 && y < H; y++) {
+                tmpPx.set(px.subarray(y * W + x0 - 1, y * W + x1 + 1), y * W + x0 - 1);
+            }
+            for (let y = y0; y < y1; y++) {
+                let idx = y * W + x0;
+                for (let x = x0; x < x1; x++, idx++) {
+                    const p = pbuf[idx];
+                    const pl = pbuf[idx - 1], pr = pbuf[idx + 1], pu = pbuf[idx - W], pd = pbuf[idx + W];
+                    if (p === pl && p === pr && p === pu && p === pd) continue;
+
+                    let r = 0, g = 0, b = 0, n = 0;
+                    if (pl !== BG_PART) { const c = tmpPx[idx - 1]; r += c & 255; g += (c >> 8) & 255; b += (c >> 16) & 255; n++; }
+                    if (pr !== BG_PART) { const c = tmpPx[idx + 1]; r += c & 255; g += (c >> 8) & 255; b += (c >> 16) & 255; n++; }
+                    if (pu !== BG_PART) { const c = tmpPx[idx - W]; r += c & 255; g += (c >> 8) & 255; b += (c >> 16) & 255; n++; }
+                    if (pd !== BG_PART) { const c = tmpPx[idx + W]; r += c & 255; g += (c >> 8) & 255; b += (c >> 16) & 255; n++; }
+
+                    if (p === BG_PART) {
+                        // Background next to the cat: partially transparent blend of the neighbors
+                        if (!n) continue;
+                        const alpha = n * 52;
+                        px[idx] = (alpha << 24) | (((b / n) | 0) << 16) | (((g / n) | 0) << 8) | ((r / n) | 0);
+                    } else {
+                        // Edge inside the cat: average with neighbors (self counts double)
+                        const c = tmpPx[idx];
+                        r += 2 * (c & 255); g += 2 * ((c >> 8) & 255); b += 2 * ((c >> 16) & 255); n += 2;
+                        px[idx] = 0xff000000 | (((b / n) | 0) << 16) | (((g / n) | 0) << 8) | ((r / n) | 0);
+                    }
+                }
+            }
+        }
+
+        function stamp(x, y, z, r, color) {
+            const x0 = Math.max(0, Math.floor(x - r)), x1 = Math.min(W - 1, Math.floor(x + r));
+            const y0 = Math.max(0, Math.floor(y - r)), y1 = Math.min(H - 1, Math.floor(y + r));
+            const r2 = r * r + 0.25;
+            for (let yy = y0; yy <= y1; yy++) {
+                const dy = yy + 0.5 - y;
+                for (let xx = x0; xx <= x1; xx++) {
+                    const dx = xx + 0.5 - x;
+                    if (dx * dx + dy * dy > r2) continue;
+                    const idx = yy * W + xx;
+                    if (z > zb[idx]) { px[idx] = color; pbuf[idx] = LINE_PART; }
+                }
+            }
+        }
+
+        function stampEllipse(x, y, z, rx, ry, color) {
+            const x0 = Math.max(0, Math.floor(x - rx)), x1 = Math.min(W - 1, Math.ceil(x + rx));
+            const y0 = Math.max(0, Math.floor(y - ry)), y1 = Math.min(H - 1, Math.ceil(y + ry));
+            const irx = 1 / rx, iry = 1 / ry;
+            for (let yy = y0; yy <= y1; yy++) {
+                const dy = (yy + 0.5 - y) * iry;
+                for (let xx = x0; xx <= x1; xx++) {
+                    const dx = (xx + 0.5 - x) * irx;
+                    if (dx * dx + dy * dy > 1) continue;
+                    const idx = yy * W + xx;
+                    if (z > zb[idx]) { px[idx] = color; pbuf[idx] = LINE_PART; }
+                }
+            }
+        }
+
+        function rasterMouth() {
+            if (mouthOpen < 0.03) return;
+            const j = mouthAnchor.vi * 3, o = mouthAnchor.o;
+            const x = pos[j] + o[0], y = pos[j + 1] + o[1] + 5 * mouthOpen, z = pos[j + 2] + o[2];
+            const cx = m00 * x + m01 * y + m02 * z;
+            const cy = m10 * x + m11 * y + m12 * z + bob;
+            const cz = m20 * x + m21 * y + m22 * z;
+            const d = CAM - cz - 8;
+            const s = focal / d;
+            const sx = cX + cx * s, sy = cY + cy * s;
+            const rx = (8 + 6 * mouthOpen) * s, ry = (1.5 + 12 * mouthOpen) * s;
+            stampEllipse(sx, sy, 1 / d, rx, ry, MOUTH_DARK);
+            stampEllipse(sx, sy + ry * 0.45, 1 / d, rx * 0.6, ry * 0.45, TONGUE);
+        }
+
+        // Projects line points to the screen and grows the bounding box to include them
+        function projectLines(box) {
+            for (const L of lines) {
+                L.proj = [];
+                const count = L.wk ? WHISKER_PTS : L.pts.length;
+                for (let k = 0; k < count; k++) {
+                    let x, y, z;
+                    if (L.wk) {
+                        x = L.wk.pos[k * 3]; y = L.wk.pos[k * 3 + 1]; z = L.wk.pos[k * 3 + 2];
+                    } else {
+                        const a = L.pts[k], j = a.vi * 3;
+                        x = pos[j] + a.o[0]; y = pos[j + 1] + a.o[1]; z = pos[j + 2] + a.o[2];
+                    }
+                    const cx = m00 * x + m01 * y + m02 * z;
+                    const cy = m10 * x + m11 * y + m12 * z + bob;
+                    const cz = m20 * x + m21 * y + m22 * z;
+                    const d = CAM - cz - 3; // small bias so lines sit on the surface
+                    const s = focal / d;
+                    const p = [cX + cx * s, cY + cy * s, 1 / d, Math.max(0.55, L.width * 0.5 * s)];
+                    L.proj.push(p);
+                    if (p[0] < box[0]) box[0] = p[0];
+                    if (p[1] < box[1]) box[1] = p[1];
+                    if (p[0] > box[2]) box[2] = p[0];
+                    if (p[1] > box[3]) box[3] = p[1];
+                }
+            }
+        }
+
+        function rasterLines() {
+            for (const L of lines) {
+                let prev = null;
+                for (const cur of L.proj) {
+                    if (prev) {
+                        const dx = cur[0] - prev[0], dy = cur[1] - prev[1];
+                        const steps = Math.max(1, Math.ceil(Math.hypot(dx, dy) * 1.5));
+                        for (let k = 0; k <= steps; k++) {
+                            const t = k / steps;
+                            stamp(prev[0] + dx * t, prev[1] + dy * t,
+                                prev[2] + (cur[2] - prev[2]) * t,
+                                prev[3] + (cur[3] - prev[3]) * t, L.color);
+                        }
+                    }
+                    prev = cur;
+                }
+            }
+        }
+
+        function drawShadow() {
+            const s = focal / CAM;
+            const rx = 150 * s, ry = 26 * s;
+            ctx.save();
+            ctx.globalCompositeOperation = 'destination-over';
+            ctx.translate(cX, cY + 200 * s);
+            ctx.scale(1, ry / rx);
+            const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+            g.addColorStop(0, 'rgba(20, 10, 40, 0.35)');
+            g.addColorStop(1, 'rgba(20, 10, 40, 0)');
+            ctx.fillStyle = g;
+            ctx.beginPath();
+            ctx.arc(0, 0, rx, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        // Only clear/upload the screen region the cat covers (this frame and last)
+        function render() {
+            const box = transformVertices();
+            projectLines(box);
+            const s = focal / CAM;
+            box[0] = Math.min(box[0], cX - 150 * s);
+            box[2] = Math.max(box[2], cX + 150 * s);
+            box[3] = Math.max(box[3], cY + 226 * s);
+
+            const pad = 6;
+            const cur = [
+                Math.max(0, Math.floor(box[0]) - pad), Math.max(0, Math.floor(box[1]) - pad),
+                Math.min(W, Math.ceil(box[2]) + pad), Math.min(H, Math.ceil(box[3]) + pad)
+            ];
+            const dirty = prevBox
+                ? [Math.min(cur[0], prevBox[0]), Math.min(cur[1], prevBox[1]), Math.max(cur[2], prevBox[2]), Math.max(cur[3], prevBox[3])]
+                : [0, 0, W, H];
+
+            for (let y = dirty[1]; y < dirty[3]; y++) {
+                const s0 = y * W + dirty[0], s1 = y * W + dirty[2];
+                px.fill(0, s0, s1);
+                zb.fill(0, s0, s1);
+                idb.fill(-1, s0, s1);
+                pbuf.fill(BG_PART, s0, s1);
+            }
+
+            rasterTriangles();
+            shadePixels(cur);
+            rasterMouth();
+            rasterLines();
+            antialias(cur);
+            if (dirty[2] > dirty[0] && dirty[3] > dirty[1]) {
+                ctx.putImageData(img, 0, 0, dirty[0], dirty[1], dirty[2] - dirty[0], dirty[3] - dirty[1]);
+            }
+            drawShadow();
+            prevBox = cur;
+        }
+
+        // ------------------------------------------------------------------
+        // Input
+        // ------------------------------------------------------------------
+
+        // Cartoon white glove cursor: open hand, or a fist while grabbing
+        const glove = document.getElementById('glove');
+        const GLOVE_SHAPES = {
+            open: [
+                { cap: [26, 34, 23, 14], r: 4.2 }, { cap: [33, 32, 32, 10], r: 4.2 },
+                { cap: [40, 32, 41, 11], r: 4.2 }, { cap: [47, 34, 50, 17], r: 4.0 },
+                { cap: [24, 42, 13, 32], r: 4.6 },
+                { ell: [36, 40, 14, 13] },
+                { cap: [26, 57, 46, 57], r: 6.5 }
+            ],
+            grab: [
+                { ell: [36, 38, 16, 14] },
+                { cap: [25, 27, 25, 27], r: 6 }, { cap: [32, 24, 32, 24], r: 6.2 },
+                { cap: [40, 24, 40, 24], r: 6.2 }, { cap: [47, 27, 47, 27], r: 6 },
+                { cap: [22, 40, 38, 43], r: 5 },
+                { cap: [26, 57, 46, 57], r: 6.5 }
+            ]
+        };
+        const GLOVE_DETAILS = {
+            open: [[29.5, 31, 29, 25], [36.5, 30, 36.5, 24], [43.5, 31, 44.5, 25], [31, 39, 31, 46], [36, 38, 36, 46], [41, 39, 41, 46], [25, 53, 47, 53]],
+            grab: [[28.5, 29, 28.5, 25], [36, 27.5, 36, 23], [43.5, 29, 43.5, 25], [27, 46, 37, 47], [25, 53, 47, 53]]
+        };
+        let gloveState = '';
+
+        function drawGlove(state) {
+            const dpr = window.devicePixelRatio || 1, S = 72;
+            glove.width = S * dpr;
+            glove.height = S * dpr;
+            const g = glove.getContext('2d');
+            g.setTransform(dpr, 0, 0, dpr, 0, 0);
+            g.lineCap = 'round';
+            g.lineJoin = 'round';
+            const shapes = GLOVE_SHAPES[state === 'grab' ? 'grab' : 'open'];
+            // Outline pass, then white pass, so the shapes merge into one silhouette
+            for (const [color, grow] of [['#2b2b38', 2.4], ['#ffffff', 0]]) {
+                g.strokeStyle = g.fillStyle = color;
+                for (const s of shapes) {
+                    g.beginPath();
+                    if (s.cap) {
+                        g.lineWidth = 2 * (s.r + grow);
+                        g.moveTo(s.cap[0], s.cap[1]);
+                        g.lineTo(s.cap[2] + 0.01, s.cap[3]);
+                        g.stroke();
+                    } else {
+                        g.ellipse(s.ell[0], s.ell[1], s.ell[2] + grow, s.ell[3] + grow, 0, 0, Math.PI * 2);
+                        g.fill();
+                    }
+                }
+            }
+            // Soft shading toward the bottom right
+            const shade = g.createLinearGradient(20, 15, 55, 65);
+            shade.addColorStop(0, 'rgba(255,255,255,0)');
+            shade.addColorStop(1, 'rgba(120,120,160,0.25)');
+            g.globalCompositeOperation = 'source-atop';
+            g.fillStyle = shade;
+            g.fillRect(0, 0, S, S);
+            g.globalCompositeOperation = 'source-over';
+            // Finger creases and glove stitching
+            g.strokeStyle = 'rgba(43,43,56,0.55)';
+            g.lineWidth = 1.3;
+            for (const d of GLOVE_DETAILS[state === 'grab' ? 'grab' : 'open']) {
+                g.beginPath();
+                g.moveTo(d[0], d[1]);
+                g.lineTo(d[2], d[3]);
+                g.stroke();
+            }
+        }
+
+        function setGlove(state) {
+            if (state === gloveState) return;
+            const redraw = (state === 'grab') !== (gloveState === 'grab') || !gloveState;
+            gloveState = state;
+            if (redraw) drawGlove(state);
+            glove.dataset.scale = state === 'hover' ? '1.12' : state === 'grab' ? '0.95' : '1';
+        }
+
+        function moveGlove(e) {
+            if (e.pointerType === 'touch') { glove.style.display = 'none'; return; }
+            glove.style.display = 'block';
+            glove.style.transform = `translate(${e.clientX - 36}px, ${e.clientY - 36}px) scale(${glove.dataset.scale || 1})`;
+        }
+
+        const canGrab = () => overFace(mouse.x, mouse.y) || !!hitWhisker(mouse.x, mouse.y);
+        setGlove('open');
+        function toCanvas(e) {
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) * W) / rect.width;
+            mouse.y = ((e.clientY - rect.top) * H) / rect.height;
+        }
+
+        // Find the vertex under the cursor using the triangle-id buffer
+        function pick(mx, my) {
+            const x0 = Math.round(mx), y0 = Math.round(my);
+            const rad = Math.round(5 * pxScale);
+            let bestT = -1, bestD = Infinity;
+            for (let dy = -rad; dy <= rad; dy++) {
+                for (let dx = -rad; dx <= rad; dx++) {
+                    const x = x0 + dx, y = y0 + dy;
+                    if (x < 0 || y < 0 || x >= W || y >= H) continue;
+                    const t = idb[y * W + x];
+                    const d = dx * dx + dy * dy;
+                    if (t >= 0 && d < bestD) { bestD = d; bestT = t; }
+                }
+            }
+            if (bestT < 0) return -1;
+            let best = -1, bd = Infinity;
+            for (let k = 0; k < 3; k++) {
+                const v = tri[bestT * 3 + k];
+                const d = (scrX[v] - mx) ** 2 + (scrY[v] - my) ** 2;
+                if (d < bd) { bd = d; best = v; }
+            }
+            return best;
+        }
+
+        function overFace(mx, my) {
+            const x = Math.round(mx), y = Math.round(my);
+            return x >= 0 && y >= 0 && x < W && y < H && idb[y * W + x] >= 0;
+        }
+
+        // Finds a visible whisker near the cursor; gf = fractional point index along the strand
+        function hitWhisker(mx, my) {
+            let best = null, bestD = (7 * pxScale) ** 2;
+            for (const L of lines) {
+                if (!L.wk || !L.proj) continue;
+                const P = L.proj;
+                for (let i = 0; i < P.length - 1; i++) {
+                    const a = P[i], b = P[i + 1];
+                    const ex = b[0] - a[0], ey = b[1] - a[1];
+                    const s = clamp(((mx - a[0]) * ex + (my - a[1]) * ey) / (ex * ex + ey * ey || 1), 0, 1);
+                    const qx = a[0] + ex * s, qy = a[1] + ey * s;
+                    const d = (mx - qx) ** 2 + (my - qy) ** 2;
+                    if (d >= bestD) continue;
+                    const ix = Math.round(qx), iy = Math.round(qy);
+                    if (ix < 0 || iy < 0 || ix >= W || iy >= H) continue;
+                    const z = a[2] + (b[2] - a[2]) * s;
+                    if (z <= zb[iy * W + ix]) continue; // hidden behind the head
+                    bestD = d;
+                    best = { wk: L.wk, gf: Math.max(0.5, i + s), iz: z };
+                }
+            }
+            return best;
+        }
+
+        function startGrab() {
+            grab.sx = mouse.x;
+            grab.sy = mouse.y;
+            pull[0] = pull[1] = pull[2] = 0;
+            surprise = 1;
+            dragging = true;
+            wake();
+            setGlove('grab');
+        }
+
+        canvas.addEventListener('pointerdown', (e) => {
+            toCanvas(e);
+            hovering = true;
+
+            // Whiskers first (they sit in front of the face)
+            const wh = hitWhisker(mouse.x, mouse.y);
+            if (wh) {
+                canvas.setPointerCapture(e.pointerId);
+                weight.fill(0);
+                grab.wk = wh.wk;
+                grab.gf = Math.round(wh.gf * 100) / 100;
+                setWhiskerWeights(wh.wk, grab.gf);
+                grab.d = 1 / wh.iz;
+                startGrab();
+                moveGlove(e);
+                return;
+            }
+
+            const vi = pick(mouse.x, mouse.y);
+            if (vi < 0) return;
+            canvas.setPointerCapture(e.pointerId);
+            grab.wk = null;
+            setGrabVertex(vi);
+            grab.d = 1 / invZ[vi];
+            startGrab();
+            moveGlove(e);
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            toCanvas(e);
+            hovering = true;
+            if (!dragging) setGlove(canGrab() ? 'hover' : 'open');
+            moveGlove(e);
+        });
+
+        function release(e) {
+            if (!dragging) return;
+            if (!e.shiftKey) {
+                // Keep the stretch. Round the pull so a shared link reproduces it exactly.
+                const p = [Math.round(pull[0]), Math.round(pull[1]), Math.round(pull[2])];
+                if (grab.wk) {
+                    bakeWhisker(grab.wk, p, RELEASE_JIGGLE);
+                    ops.push({ t: 'w', i: whiskers.indexOf(grab.wk), gf: grab.gf, p });
+                } else {
+                    computeWeights(fracFromPull(p));
+                    bakeMesh(p, RELEASE_JIGGLE);
+                    ops.push({ t: 'm', i: grab.vi, p });
+                }
+                updateShareLink();
+            }
+            dragging = false;
+            pullFrac = 0;
+            wake();
+            setGlove(canGrab() ? 'hover' : 'open');
+            moveGlove(e);
+        }
+        canvas.addEventListener('pointerup', release);
+        canvas.addEventListener('pointercancel', release);
+        canvas.addEventListener('pointerleave', () => {
+            if (!dragging) hovering = false;
+            glove.style.display = 'none';
+        });
+
+        canvas.addEventListener('dblclick', () => resetCat());
+
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+            spinTarget += delta * 0.004;
+        }, { passive: false });
+
+        // ------------------------------------------------------------------
+        // Shareable stretches: every kept stretch is recorded and stored in the
+        // URL (#c1=...), so the link reproduces the same cat.
+        // ------------------------------------------------------------------
+        const ops = [];
+        const SHARE_PREFIX = '#c1=';
+        const MAX_OPS = 200;
+
+        function updateShareLink() {
+            const enc = (n) => Math.round(n).toString(36);
+            const str = ops.map(o => o.t === 'm'
+                ? 'm' + [o.i, ...o.p].map(enc).join(',')
+                : 'w' + [o.i, o.gf * 100, ...o.p].map(enc).join(',')).join('~');
+            const url = location.pathname + location.search + (str ? SHARE_PREFIX + str : '');
+            try { history.replaceState(null, '', url); } catch { /* some file:// setups disallow this */ }
+        }
+
+        // Springs everything back to normal and clears the link
+        function resetCat() {
+            held.fill(0);
+            for (const wk of whiskers) wk.held.fill(0);
+            ops.length = 0;
+            updateShareLink();
+            wake();
+            const turn = Math.PI * 2;
+            spinTarget = Math.round(spin / turn) * turn;
+        }
+
+        // Rebuilds the stretches from the link (input is untrusted: only small numbers are accepted)
+        function loadFromLink() {
+            if (!location.hash.startsWith(SHARE_PREFIX)) return;
+            const body = location.hash.slice(SHARE_PREFIX.length);
+            if (!/^[0-9a-z,~\-]*$/.test(body)) return;
+            const lim = MAX_PULL * 1.2;
+            for (const tok of body.split('~').slice(0, MAX_OPS)) {
+                const kind = tok[0];
+                const nums = tok.slice(1).split(',').map(v => parseInt(v, 36));
+                if (nums.some(n => !Number.isFinite(n))) continue;
+                const p = nums.slice(-3).map(v => clamp(v, -lim, lim));
+                if (kind === 'm' && nums.length === 4 && nums[0] >= 0 && nums[0] < N) {
+                    setGrabVertex(nums[0]);
+                    computeWeights(fracFromPull(p));
+                    bakeMesh(p, 0);
+                    ops.push({ t: 'm', i: nums[0], p });
+                } else if (kind === 'w' && nums.length === 5 && nums[0] >= 0 && nums[0] < whiskers.length) {
+                    const gf = clamp(nums[1] / 100, 0.5, WHISKER_PTS - 1);
+                    setWhiskerWeights(whiskers[nums[0]], gf);
+                    bakeWhisker(whiskers[nums[0]], p, 0);
+                    ops.push({ t: 'w', i: nums[0], gf, p });
+                }
+            }
+            weight.fill(0);
+            wake(); // the cat springs into its shared shape
+        }
+        loadFromLink();
+
+        // ------------------------------------------------------------------
+        // Help + share buttons
+        // ------------------------------------------------------------------
+        const helpBtn = document.getElementById('helpBtn');
+        const helpPanel = document.getElementById('helpPanel');
+        const shareBtn = document.getElementById('shareBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const toast = document.getElementById('toast');
+        let toastTimer = 0;
+
+        function setHelp(open) {
+            helpPanel.hidden = !open;
+            helpBtn.setAttribute('aria-expanded', String(open));
+        }
+        helpBtn.addEventListener('click', () => setHelp(helpPanel.hidden));
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setHelp(false); });
+
+        function showToast(text) {
+            toast.textContent = text;
+            toast.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+        }
+
+        shareBtn.addEventListener('click', async () => {
+            const url = location.href;
+            try {
+                await navigator.clipboard.writeText(url);
+                showToast(ops.length ? 'Link to your cat copied!' : 'Link copied! (stretch the cat first to share your creation)');
+            } catch {
+                window.prompt('Copy this link:', url); // clipboard needs https; fall back to manual copy
+            }
+        });
+
+        resetBtn.addEventListener('click', () => {
+            resetCat();
+            showToast('Cat reset');
+        });
+
+        // ------------------------------------------------------------------
+        // Main loop
+        // ------------------------------------------------------------------
+        let last = performance.now();
+        let workAvg = 0, qualityTimer = 0;
+        function frame(now) {
+            const dt = Math.min(0.05, (now - last) / 1000);
+            last = now;
+            time += dt;
+
+            const t0 = performance.now();
+            updateHead(dt);
+            updateFace(dt);
+            updateEyes(dt);
+            updatePull();
+            stepPhysics(dt);
+            computeNormals();
+            render();
+
+            // Lower the render resolution if this machine can't keep up
+            workAvg += (performance.now() - t0 - workAvg) * 0.05;
+            qualityTimer += dt;
+            if (qualityTimer > 2) {
+                qualityTimer = 0;
+                if (workAvg > 20 && quality > 0.6 && !dragging) {
+                    quality -= 0.15;
+                    resize();
+                }
+            }
+
+            requestAnimationFrame(frame);
+        }
+        requestAnimationFrame(frame);
+    })();
+    </script>
+</body>
+</html>
