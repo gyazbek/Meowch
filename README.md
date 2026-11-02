@@ -2,6 +2,8 @@
 
 A stretchy 3D cat face you can grab, pull and share.
 
+**[Play it here](https://gyazbek.github.io/Meowch/)**
+
 ![An orange cat face wearing a red cap with a white paw print](screenshot.png)
 
 If you ever spent more time yanking on a face on an old game's title screen than actually playing the game, you'll get the idea. This is that, except it's a cat. Wearing a cap.
